@@ -17,7 +17,7 @@ collect_data.py          generate_docs.py
 └──────────────┘
 ```
 
-1. **`collect_data.py`** reads the Blackbox Exporter targets from `prometheus.yml`, queries Grafana Cloud's Prometheus endpoint for each target's current `up` status, and reads the local Tailscale client's node list via `tailscale status --json`. It writes everything to `network_data.json`.
+1. **`collect_data.py`** reads the Blackbox Exporter targets from `prometheus.yml`, queries Grafana Cloud's Prometheus endpoint for each target's current `probe_success` status (whether the device actually answered the ICMP probe), and reads the local Tailscale client's node list via `tailscale status --json`. It writes everything to `network_data.json`.
 2. **`generate_docs.py`** loads that JSON, builds a prompt that explicitly forbids inventing data, sends it to the Gemini API, and writes the result to `docs/network-topology.md`.
 
 ## Prerequisites
@@ -69,20 +69,20 @@ python3 generate_docs.py
 `collect_data.py` prints a short summary of what it found:
 
 ```
-Datos guardados en network_data.json
-  Dispositivos: 6
-  Nodos Tailscale: 2
+Data saved to network_data.json
+  Devices: 6
+  Tailscale nodes: 2
 ```
 
 `generate_docs.py` prints which model generated the final document and writes the result to `docs/network-topology.md`:
 
 ```
-Probando modelo 'gemini-3.8-flash' (intento 1/2)...
-[warn] 'gemini-3.8-flash' falló (intento 1): 504 DEADLINE_EXCEEDED...
+Trying model 'gemini-3.8-flash' (attempt 1/2)...
+[warn] 'gemini-3.8-flash' failed (attempt 1): 504 DEADLINE_EXCEEDED...
 ...
-Probando modelo 'gemini-3.5-flash' (intento 1/2)...
-Éxito con el modelo 'gemini-3.5-flash'.
-Documentación guardada en docs/network-topology.md (modelo usado: gemini-3.5-flash)
+Trying model 'gemini-3.5-flash' (attempt 1/2)...
+Success with model 'gemini-3.5-flash'.
+Documentation saved to docs/network-topology.md (model used: gemini-3.5-flash)
 ```
 
 A sample run is shown below:
@@ -108,9 +108,13 @@ These constraints exist specifically to prevent the model from filling gaps with
 - **Human-in-the-loop review.** `generate_docs.py` prints an explicit reminder to review the output before committing it. Generated documentation is treated as a draft, not a final artifact, until a human has checked it against `network_data.json`.
 - **Least-privilege credentials.** The Grafana Cloud token used here is scoped to read-only access, separate from the write-scoped token used elsewhere in the stack.
 
+## Why two scripts
+
+Collection and generation are kept separate on purpose. Gemini can return 503/504 errors, so you can re-run `generate_docs.py` as many times as needed without re-querying Grafana Cloud. It also leaves `network_data.json` on disk as an inspectable snapshot, so you can check exactly what the model was given before trusting what it wrote.
+
 ## Model fallback strategy
 
-Gemini's hosted models occasionally return `503 UNAVAILABLE` (high demand) or `504 DEADLINE_EXCEEDED` (timeout) errors. Rather than failing on the first error, `generate_docs.py` retries each model in `MODELS` up to twice with a backoff delay, then moves to the next model in the list:
+Gemini's hosted models occasionally return `503 UNAVAILABLE` (high demand) or `504 DEADLINE_EXCEEDED` (timeout) errors. Each API call also has a 60-second timeout so a stalled request cannot hang the script. Rather than failing on the first error, `generate_docs.py` retries each model in `MODELS` up to twice with a backoff delay, then moves to the next model in the list:
 
 ```python
 MODELS = [
@@ -141,7 +145,7 @@ A fixed model version was chosen over the `-latest` alias as the primary option,
 ## Troubleshooting
 
 - **`authentication error: invalid scope requested`** — the Grafana Cloud token being used does not have `metrics: Read`. Create a token from an access policy with that scope (see [Credentials](#credentials)).
-- **`Faltan credenciales de Grafana Cloud`** warning from `collect_data.py` — the `GRAFANA_PROM_URL`, `GRAFANA_INSTANCE_ID`, or `GRAFANA_API_TOKEN` environment variables are not set in the current shell. Check with `echo $GRAFANA_PROM_URL` etc., and re-run `source ~/.bashrc` if they were only just added.
+- **`Missing Grafana Cloud credentials`** warning from `collect_data.py` — the `GRAFANA_PROM_URL`, `GRAFANA_INSTANCE_ID`, or `GRAFANA_API_TOKEN` environment variables are not set in the current shell. Check with `echo $GRAFANA_PROM_URL` etc., and re-run `source ~/.bashrc` if they were only just added.
 - **`404 NOT_FOUND ... is no longer available`** or **`... is not found for API version v1beta`** — the hardcoded model name has been deprecated or renamed. List the models currently available to your API key:
   ```bash
   python3 -c "
